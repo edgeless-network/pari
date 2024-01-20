@@ -4,6 +4,8 @@ import {
   ConditionalTokens,
   WETH,
   FPMMDeterministicFactory,
+  FixedProductMarketMaker,
+  FixedProductMarketMaker__factory,
 } from "../typechain-types";
 
 import { Signer, ZeroHash } from "ethers";
@@ -11,9 +13,12 @@ import { Signer, ZeroHash } from "ethers";
 describe("Test an end to end fixed product market maker and conditional tokens", function () {
   let creator: Signer;
   let oracle: Signer;
+  let funder: Signer;
+  let buyer: Signer;
   let conditionalTokens: ConditionalTokens;
   let collateralToken: WETH;
   let fpmmDeterministicFactory: FPMMDeterministicFactory;
+  let fpmm: FixedProductMarketMaker;
 
   const questionId = randomBytes(32);
   const numOutcomes = 10;
@@ -21,8 +26,8 @@ describe("Test an end to end fixed product market maker and conditional tokens",
   let collectionIds: string[];
   let positionIds: bigint[];
 
-  beforeEach(async function () {
-    [creator, oracle] = await ethers.getSigners();
+  before(async function () {
+    [creator, oracle, funder, buyer] = await ethers.getSigners();
     conditionalTokens = await (
       await ethers.getContractFactory("ConditionalTokens")
     ).deploy();
@@ -69,7 +74,22 @@ describe("Test an end to end fixed product market maker and conditional tokens",
         { from: creator }
       );
       await conditionalTokens.prepareCondition(oracle, questionId, numOutcomes);
-      const tx = await fpmmDeterministicFactory.create2FixedProductMarketMaker(
+
+      const fpmmAddr =
+        await fpmmDeterministicFactory.create2FixedProductMarketMaker.staticCall(
+          saltNonce,
+          await conditionalTokens.getAddress(),
+          await collateralToken.getAddress(),
+          [conditionId],
+          feeFactor,
+          initialFunds,
+          initialDistribution,
+          { from: creator }
+        );
+
+      fpmm = FixedProductMarketMaker__factory.connect(fpmmAddr, creator);
+
+      await fpmmDeterministicFactory.create2FixedProductMarketMaker(
         saltNonce,
         await conditionalTokens.getAddress(),
         await collateralToken.getAddress(),
@@ -79,6 +99,42 @@ describe("Test an end to end fixed product market maker and conditional tokens",
         initialDistribution,
         { from: creator }
       );
+    });
+
+    it("Fund fixed product market maker", async function () {
+      await collateralToken.connect(funder).deposit({ value: initialFunds });
+      await collateralToken
+        .connect(funder)
+        .approve(await fpmm.getAddress(), initialFunds);
+
+      await fpmm.connect(funder).addFunding(initialFunds, []);
+    });
+
+    it("Buy from fixed product market maker", async function () {
+      await collateralToken.connect(buyer).deposit({ value: initialFunds });
+      await collateralToken
+        .connect(buyer)
+        .approve(await fpmm.getAddress(), initialFunds);
+
+      const outcomeIndex = 5;
+      const buyAMount = (1e18).toString();
+      const minTokensToBuy = await fpmm.calcBuyAmount(buyAMount, outcomeIndex);
+      await fpmm.connect(buyer).buy(buyAMount, outcomeIndex, minTokensToBuy);
+    });
+
+    it("close fixed product market maker", async function () {
+      const outcomeIndex = 5;
+      const payout = Array.from({ length: numOutcomes }, () => "0");
+      payout[outcomeIndex] = (1e18).toString();
+      await conditionalTokens.connect(oracle).reportPayouts(questionId, payout);
+      await conditionalTokens
+        .connect(buyer)
+        .redeemPositions(
+          await collateralToken.getAddress(),
+          ZeroHash,
+          conditionId,
+          [1 << outcomeIndex]
+        );
     });
   });
 });
